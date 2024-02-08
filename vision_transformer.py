@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-trunc_normal_ = lambda *args, **kwargs: None
+from utils import trunc_normal_
     
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
