@@ -11,18 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Shai:
+# This version was taken from https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
+# On Jan 24th, 2022
+# Git hash of last commit: 4b96393c4c877d127cff9f077468e4a1cc2b5e2d
+ 
 """
 Mostly copy-paste from timm library.
 https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
 """
+from typing import *
+
 import math
 from functools import partial
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from utils import trunc_normal_
-
+trunc_normal_ = lambda *args, **kwargs: None
+    
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
@@ -46,21 +54,41 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
+class MatLinearIn(nn.Linear):
+    def forward(self, input, *, mat_slice: Optional[int] = None):
+        weight = self.weight
+        bias = self.bias
+        if mat_slice is not None:
+            weight = weight[:mat_slice]
+            if bias is not None:
+                bias = bias[:mat_slice]
+        return F.linear(input, weight, bias)
+
+
+class MatLinearOut(nn.Linear):
+    def forward(self, input, *, mat_slice: Optional[int] = None):
+        weight = self.weight
+        bias = self.bias
+        if mat_slice is not None:
+            weight = weight[:, :mat_slice]
+        return F.linear(input, weight, bias)
+
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.fc1 = MatLinearIn(in_features, hidden_features)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc2 = MatLinearOut(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x):
-        x = self.fc1(x)
+    def forward(self, x, *, mat_slice: Optional[int] = None):
+        x = self.fc1(x, mat_slice=mat_slice)
         x = self.act(x)
         x = self.drop(x)
-        x = self.fc2(x)
+        x = self.fc2(x, mat_slice=mat_slice)
         x = self.drop(x)
         return x
 
@@ -104,12 +132,12 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x, return_attention=False, *, mat_slice=None):
         y, attn = self.attn(self.norm1(x))
         if return_attention:
             return attn
         x = x + self.drop_path(y)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x), mat_slice=mat_slice))
         return x
 
 
@@ -206,10 +234,10 @@ class VisionTransformer(nn.Module):
 
         return self.pos_drop(x)
 
-    def forward(self, x):
+    def forward(self, x, *, mat_slice=None):
         x = self.prepare_tokens(x)
         for blk in self.blocks:
-            x = blk(x)
+            x = blk(x, mat_slice=mat_slice)
         x = self.norm(x)
         return x[:, 0]
 
@@ -231,27 +259,6 @@ class VisionTransformer(nn.Module):
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
-
-
-def vit_tiny(patch_size=16, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-
-def vit_small(patch_size=16, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-
-def vit_base(patch_size=16, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
 
 
 class DINOHead(nn.Module):
@@ -289,3 +296,39 @@ class DINOHead(nn.Module):
         x = nn.functional.normalize(x, dim=-1, p=2)
         x = self.last_layer(x)
         return x
+    
+
+def vit_tiny(patch_size=16, **kwargs):
+    model = VisionTransformer(
+        patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+
+def vit_small(patch_size=16, **kwargs):
+    model = VisionTransformer(
+        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+
+def vit_base(patch_size=16, **kwargs):
+    model = VisionTransformer(
+        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+
+def vit_large(patch_size=16, **kwargs):
+    model = VisionTransformer(
+        patch_size=patch_size, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+
+def vit_huge(patch_size=14, **kwargs):
+    model = VisionTransformer(
+        patch_size=patch_size, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
